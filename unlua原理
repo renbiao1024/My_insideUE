@@ -1,0 +1,62 @@
+lua栈
+    当C/C++想调用lua中一个值时，lua将数值压入lua虚拟栈中，
+    然后通过lua提供api来读取，当C/C++想向lua传入一个值时，
+    C++通过lua提供的api将数值压入lua虚拟栈中，lua便可进行调用，通过这样交互完成相互调用。
+    也就是说，C/C++并没有直接和lua数据完全的绝对互通，
+    而是通过这个lua虚拟栈作桥梁。一旦数据进入lua那边，就是lua自己维护了，包含lua自己产生的变量或者管理的数据，
+    C++要想访问只能先让lua将其放到栈上再通过lua api来访问。
+
+lua栈内部是分配TValue结构体数组作为栈
+
+    typedef union Value {
+    GCObject *gc;    /* collectable objects */
+    void *p;         /* light userdata */
+    int b;           /* booleans */
+    lua_CFunction f; /* light C functions */
+    lua_Integer i;   /* integer numbers */
+    lua_Number n;    /* float numbers */
+    } Value;
+    #define TValuefields	Value value_; int tt_
+    typedef struct lua_TValue {
+        TValuefields;
+    } TValue;
+
+TValue包含数据value_与类型tt_两个部分，其中value_是Value联合体，这个联合体包括gc指针，bool，userdata，整数，及符点数，在64平台下占用8个字节。
+    gc对象来说，比如string,table,thread等还需要堆上再分配内存，这里只是保存指针，生合周期结束后会被垃圾回收，有点像STL的容器。
+    非gc对象来说，存储的类型也就是它面字面意思，lua_Integer实际是long long，lua_Number实际是double，只有bool类型用了int来存了。
+    它们无需再单独向堆上分配内存，存在栈上，不用进行垃圾回收。
+
+lua调用c
+    普通C函数转成lua_CFunction形式 （lua规定调用注册过的c函数的形式是typedef int (*lua_CFunction) (lua_State *L) ）
+    转成lua_CFunction形式注册到lua全局表中，并分配一个函数名称，一般保留和C一样的名称
+    在lua代码中调用注册过的函数，最终就会调用到普通C函数
+    调用过程实际：lua先把注册的函数压入虚拟栈中，再将参数压入，执行C函数，然后将它们弹出栈，将返回值压入到虚拟栈顶
+
+c调用lua
+    通过lua_getglobal这个API获取lua函数，并将其压入虚拟栈
+    如果有参数的话，通过类似lua_pushnumber，lua_pushstring这样的API，将参数压入虚拟栈
+    调用lua_call(L,n,r)这样的宏接口，进行调用，告知虚拟机，函数有n个参数，r个返回值
+    调用完成后，lua会将返回值压入栈，C/C++那端就可以通过类似lua_tonumber这样的API来读取函数返回值
+
+    // lua加载字符，生成lua全局函数LuaCode_MyAdd
+    luaL_dostring(lua, "function LuaCode_MyAdd (x,y) return x+y end");
+    // lua栈和压入数据
+    lua_getglobal(lua, "LuaCode_MyAdd");
+    lua_pushinteger(lua, 100);
+    lua_pushinteger(lua, 200);
+    // C调用lua中的函数，2个传入参数，1个返回参数
+    lua_call(lua, 2, 1);
+    cout << "lua function ret:" << lua_tointeger(lua, -1) << endl;
+    // 栈回到原始状态
+    lua_pop(lua, 1);
+
+c访问/修改lua
+    通过lua_getglobal/lua_getlocal等这样API获取lua变量，并将其压入虚拟栈
+    C/C++那端就可以通过类似lua_tonumber这样的API来转换读取lua的变量值
+    如果lua值为table类型，通过lua_getfield和lua_setfield获取和修改表中元素的值
+
+LUA与C++类交互
+    我们在元表中创建方法，然后创建使用该元表的table。
+    只要创建一个元表与C++的公共方法映射起来，在Lua中创建一个使用该元表的table时就相当于创建一个C++类，
+    当我们在lua中调用元表中的元函数时就跳转到C++类中方法，回收table的时候我们就销毁C++类，
+    所以我们元表里key为"__index"的值的为metatable本身，"__gc"的值为释放方法，然后将成员操作方法添加到元表metatable。
